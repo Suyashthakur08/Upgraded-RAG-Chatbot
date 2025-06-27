@@ -8,18 +8,24 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores.pgvector import PGVector
 from langchain.chains import ConversationalRetrievalChain
 
-# Load environment variables
 load_dotenv()
 
-# --- Database Connection ---
-CONNECTION_STRING = PGVector.connection_string_from_db_params(
-    driver=os.environ.get("DB_DRIVER", "psycopg2"),
-    host=os.environ.get("DB_HOST", "localhost"),
-    port=int(os.environ.get("DB_PORT", "5432")),
-    database=os.environ.get("DB_NAME", "chatbot_db"),
-    user=os.environ.get("DB_USER", "myuser"),
-    password=os.environ.get("DB_PASSWORD", "mypassword"),
-)
+# --- CORRECTED DATABASE CONNECTION BLOCK ---
+# We access credentials directly. If a variable is missing in the .env file,
+# the app will raise a KeyError and stop, which is the desired, secure behavior.
+try:
+    CONNECTION_STRING = PGVector.connection_string_from_db_params(
+        driver=os.environ.get("DB_DRIVER", "psycopg2"), # A default here is acceptable
+        host=os.environ["DB_HOST"],
+        port=int(os.environ["DB_PORT"]),
+        database=os.environ["DB_NAME"],
+        user=os.environ["DB_USER"],
+        password=os.environ["DB_PASSWORD"],
+    )
+except KeyError as e:
+    raise ValueError(f"Missing mandatory environment variable: {e}") from e
+# ----------------------------------------------
+
 
 # In-memory store for session memories
 chat_memory_store = {}
@@ -67,5 +73,4 @@ def get_conversational_rag_chain(collection_name: str, memory: ConversationBuffe
         llm=llm,
         retriever=vectorstore.as_retriever(),
         memory=memory,
-        # You can add a custom prompt here if desired
     )
