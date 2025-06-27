@@ -1,29 +1,18 @@
-document.addEventListener('DOMContentLoaded', () => {
-    const messageInput = document.getElementById('message-input');
-    const sendButton = document.getElementById('send-button');
-    const chatMessages = document.getElementById('chat-messages');
-    const typingIndicator = document.getElementById('typing-indicator');
-    
-    // Configure marked.js options
-    marked.setOptions({
-        breaks: true,  // Convert newlines to <br>
-        gfm: true,     // GitHub flavored markdown
-        sanitize: false // Allow HTML
-    });
-    
-    // Store conversation ID and message history in session storage
-    let conversationId = sessionStorage.getItem('conversationId') || null;
-    
-    // Load existing messages if available
-    loadSavedMessages();
-    
-    // Auto-resize textarea
-    messageInput.addEventListener('input', () => {
-        messageInput.style.height = 'auto';
-        messageInput.style.height = messageInput.scrollHeight + 'px';
-    });
+// frontend/script.js
 
-    // Handle Enter key (Shift+Enter for new line)
+document.addEventListener('DOMContentLoaded', () => {
+    // DOM Elements
+    const pdfUploader = document.getElementById('pdf-uploader');
+    const uploadButton = document.getElementById('upload-button');
+    const uploadStatus = document.getElementById('upload-status');
+    const chatMessages = document.getElementById('chat-messages');
+    const messageInput = document.getElementById('message-input');
+    
+    // State
+    let sessionId = null;
+
+    // Event Listeners
+    uploadButton.addEventListener('click', handleFileUpload);
     messageInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
@@ -31,194 +20,114 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Send button click handler
-    sendButton.addEventListener('click', sendMessage);
+    async function handleFileUpload() {
+        const files = pdfUploader.files;
+        if (files.length === 0) {
+            updateStatus('Please select at least one PDF file.', 'red');
+            return;
+        }
 
-    async function sendMessage() {
-        const message = messageInput.value.trim();
-        if (!message) return;
+        // A new upload always means a new session. Reset the state.
+        sessionId = null; 
+        sessionStorage.removeItem('sessionId');
+        disableChat();
 
-        // Disable input while processing
-        messageInput.disabled = true;
-        sendButton.disabled = true;
+        const formData = new FormData();
+        for (const file of files) {
+            formData.append('files', file);
+        }
 
-        // Add user message to chat and save it
-        const userMsgId = addMessage(message, 'user');
-        saveMessage(userMsgId, message, 'user');
-
-        // Clear input
-        messageInput.value = '';
-        messageInput.style.height = 'auto';
-
-        // Show typing indicator
-        typingIndicator.classList.add('active');
+        updateStatus('Uploading and processing...', 'orange');
+        uploadButton.disabled = true;
+        chatMessages.innerHTML = ''; // Clear chat on new upload
+        addMessage('bot', 'Processing your documents. This might take a moment...');
 
         try {
-            const API_URL = window.location.hostname === 'localhost' ? 
-                'http://localhost:8000' : 
-                'https://coding-copilot.onrender.com';
-
-            const response = await fetch(`${API_URL}/chat`, {
+            // Corrected fetch call - no session_id sent
+            const response = await fetch('/upload', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    message: message,
-                    conversation_id: conversationId
-                })
-            }); 
-
-            if (!response.ok) {
-                throw new Error('Network response was not ok');
-            }
-
-            const data = await response.json();
+                body: formData,
+            });
             
-            // Store conversation ID if it's a new conversation
-            if (!conversationId) {
-                conversationId = data.conversation_id;
-                sessionStorage.setItem('conversationId', conversationId);
-            }
+            const data = await response.json();
 
-            // Add bot response to chat and save it
-            const botMsgId = addMessage(data.response, 'bot');
-            saveMessage(botMsgId, data.response, 'bot');
+            if (!response.ok) throw new Error(data.detail);
+
+            // The backend provides the new session ID. We save it.
+            sessionId = data.session_id;
+            sessionStorage.setItem('sessionId', sessionId);
+            
+            updateStatus(`Success! Ready to chat.`, 'green');
+            updateMessage(chatMessages.lastChild, data.answer); // Update "Processing..." to "Success!" message
+            enableChat();
 
         } catch (error) {
-            console.error('Error:', error);
-            const errorMsgId = addMessage('Sorry, there was an error processing your request. Please try again.', 'bot');
-            saveMessage(errorMsgId, 'Sorry, there was an error processing your request. Please try again.', 'bot');
+            updateStatus(`Error: ${error.message}`, 'red');
+            updateMessage(chatMessages.lastChild, `Error processing documents: ${error.message}`);
         } finally {
-            // Hide typing indicator
-            typingIndicator.classList.remove('active');
+            uploadButton.disabled = false;
+        }
+    }
+
+    async function sendMessage() {
+        const query = messageInput.value.trim();
+        if (!query || !sessionId) return;
+
+        addMessage('user', query);
+        messageInput.value = '';
+        messageInput.disabled = true;
+        const typingIndicator = addMessage('bot', '...');
+
+        try {
+            const response = await fetch('/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query, session_id: sessionId }),
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail);
             
-            // Re-enable input
+            updateMessage(typingIndicator, data.answer);
+
+        } catch (error) {
+            updateMessage(typingIndicator, `Error: ${error.message}`);
+        } finally {
             messageInput.disabled = false;
-            sendButton.disabled = false;
             messageInput.focus();
         }
     }
 
-    function addMessage(content, sender) {
-        const messageId = 'msg-' + Date.now();
+    function addMessage(sender, text) {
         const messageDiv = document.createElement('div');
         messageDiv.className = `message ${sender}`;
-        messageDiv.id = messageId;
-
-        const messageContent = document.createElement('div');
-        messageContent.className = 'message-content';
-
-        if (sender === 'bot') {
-            // For bot messages, use marked.js to render markdown
-            messageContent.innerHTML = marked.parse(content);
-        } else {
-            // For user messages, just preserve line breaks
-            messageContent.innerHTML = content.replace(/\n/g, '<br>');
-        }
-
-        const timeDiv = document.createElement('div');
-        timeDiv.className = 'message-time';
-        // Format time without seconds
-        const now = new Date();
-        timeDiv.textContent = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
-        messageDiv.appendChild(messageContent);
-        messageDiv.appendChild(timeDiv);
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'message-content';
+        contentDiv.innerHTML = marked.parse(text); // Use marked.js for markdown rendering
+        messageDiv.appendChild(contentDiv);
         chatMessages.appendChild(messageDiv);
-
-        // Scroll to bottom
         chatMessages.scrollTop = chatMessages.scrollHeight;
-        
-        return messageId;
+        return messageDiv; // Return the element to allow updating it (for the typing indicator)
+    }
+
+    function updateMessage(element, newText) {
+        const contentDiv = element.querySelector('.message-content');
+        contentDiv.innerHTML = marked.parse(newText);
+        chatMessages.scrollTop = chatMessages.scrollHeight;
     }
     
-    // Save message to session storage
-    function saveMessage(id, content, sender) {
-        const messages = JSON.parse(sessionStorage.getItem('chatMessages') || '[]');
-        messages.push({
-            id: id,
-            content: content,
-            sender: sender,
-            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        });
-        sessionStorage.setItem('chatMessages', JSON.stringify(messages));
+    function updateStatus(message, color) {
+        uploadStatus.textContent = message;
+        uploadStatus.style.color = color;
     }
-    
-    // Load saved messages from session storage
-    function loadSavedMessages() {
-        const messages = JSON.parse(sessionStorage.getItem('chatMessages') || '[]');
-        if (messages.length > 0) {
-            // Clear the welcome message since we're loading saved messages
-            chatMessages.innerHTML = '';
-            
-            messages.forEach(msg => {
-                const messageDiv = document.createElement('div');
-                messageDiv.className = `message ${msg.sender}`;
-                messageDiv.id = msg.id;
 
-                const messageContent = document.createElement('div');
-                messageContent.className = 'message-content';
-                
-                if (msg.sender === 'bot') {
-                    // Use marked.js for bot messages
-                    messageContent.innerHTML = marked.parse(msg.content);
-                } else {
-                    // For user messages, just preserve line breaks
-                    messageContent.innerHTML = msg.content.replace(/\n/g, '<br>');
-                }
-
-                const timeDiv = document.createElement('div');
-                timeDiv.className = 'message-time';
-                timeDiv.textContent = msg.time;
-
-                messageDiv.appendChild(messageContent);
-                messageDiv.appendChild(timeDiv);
-                chatMessages.appendChild(messageDiv);
-            });
-            
-            // Scroll to bottom of loaded messages
-            chatMessages.scrollTop = chatMessages.scrollHeight;
-        } else {
-            // Add welcome message if no saved messages
-            addMessage('Hello! I\'m your Coding Copilot. How can I help you today?', 'bot');
-        }
+    function enableChat() {
+        messageInput.disabled = false;
+        messageInput.placeholder = 'Ask a question about your documents...';
+        messageInput.focus();
     }
-    
-    // Add button to clear chat history
-    const chatHeader = document.querySelector('.chat-header');
 
-    // Create a container div for the title and button
-    const headerContainer = document.createElement('div');
-    headerContainer.style.display = 'flex';
-    headerContainer.style.justifyContent = 'space-between';
-    headerContainer.style.alignItems = 'center';
-
-    // Move the existing h1 into the container
-    const title = chatHeader.querySelector('h1');
-    chatHeader.removeChild(title);
-    headerContainer.appendChild(title);
-
-    // Create the clear button
-    const clearButton = document.createElement('button');
-    clearButton.innerHTML = 'Clear Chat';
-    clearButton.style.padding = '5px 10px';
-    clearButton.style.background = '#2d2d2d';
-    clearButton.style.color = '#ffffff';
-    clearButton.style.border = '1px solid #404040';
-    clearButton.style.borderRadius = '5px';
-    clearButton.style.cursor = 'pointer';
-
-    clearButton.addEventListener('click', () => {
-        // Clear session storage and reload page
-        sessionStorage.removeItem('chatMessages');
-        sessionStorage.removeItem('conversationId');
-        location.reload();
-    });
-
-    // Add button to the container
-    headerContainer.appendChild(clearButton);
-
-    // Add the container to the header
-    chatHeader.appendChild(headerContainer);
+    function disableChat() {
+        messageInput.disabled = true;
+        messageInput.placeholder = 'First, upload documents...';
+    }
 });

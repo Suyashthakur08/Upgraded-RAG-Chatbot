@@ -1,84 +1,97 @@
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
-from .client import chat_with_groq, save_conversation, load_conversation
-from .config import HOST, PORT, DEBUG, CONVERSATIONS_DIR
-from typing import Optional, Dict, Any
-import os
-import json
-import uuid
+# app/main.py
 
-# Create conversations directory if it doesn't exist
-os.makedirs(CONVERSATIONS_DIR, exist_ok=True)
+import os
+import uuid
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from pydantic import BaseModel
+from typing import List, Optional
+import uvicorn
+
+from .rag_chain import process_and_store_docs, get_session_memory, get_conversational_rag_chain
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+
+# --- Path and App Setup ---
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
+TEMP_UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "temp_uploads")
+os.makedirs(TEMP_UPLOAD_DIR, exist_ok=True)
 
 app = FastAPI(
-    title="Coding Copilot API",
-    description="API for interacting with the Coding Copilot powered by Groq",
-    version="1.0.0"
+    title="RAG Chatbot API",
+    description="API for a RAG chatbot powered by LangChain and Gemini.",
+    version="2.0.0"
 )
-
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific origins
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
-@app.post("/chat")
-async def chat(request: Request) -> Dict[str, Any]:
+# --- Pydantic Models ---
+class ChatRequest(BaseModel):
+    query: str
+    session_id: Optional[str] = None
+
+class ChatResponse(BaseModel):
+    answer: str
+    session_id: str
+
+# --- API Endpoints ---
+
+@app.get("/")
+async def serve_frontend():
+    return FileResponse(os.path.join(STATIC_DIR, 'index.html'))
+
+app.mount("/frontend", StaticFiles(directory=STATIC_DIR), name="frontend")
+
+# --- CORRECTED UPLOAD ENDPOINT ---
+@app.post("/upload", response_model=ChatResponse)
+async def upload_documents(files: List[UploadFile] = File(...)):
+    # The backend is now fully responsible for creating the session ID on upload.
+    session_id = f"session_{uuid.uuid4().hex[:8]}"
+    
+    file_paths = []
+    for file in files:
+        # We save the file temporarily to be read by PyPDFLoader
+        file_path = os.path.join(TEMP_UPLOAD_DIR, file.filename)
+        with open(file_path, "wb") as buffer:
+            buffer.write(await file.read())
+        file_paths.append(file_path)
+    
     try:
-        data = await request.json()
-        user_input = data.get("message")
-        conversation_id = data.get("conversation_id")
+        # The collection_name for the vector store is the session_id,
+        # linking the documents directly to this specific chat session.
+        process_and_store_docs(file_paths, collection_name=session_id)
         
-        if not user_input:
-            raise HTTPException(status_code=400, detail="Message is required")
-        
-        # Load existing conversation if conversation_id is provided
-        conversation_history = None
-        if conversation_id:
-            conversation_file = os.path.join(CONVERSATIONS_DIR, f"{conversation_id}.json")
-            try:
-                if os.path.exists(conversation_file):
-                    conversation_history = load_conversation(conversation_file)
-            except Exception as e:
-                print(f"Error loading conversation: {str(e)}")
-                conversation_history = None
-        
-        # Get response from Groq
-        response, updated_history = chat_with_groq(user_input, conversation_history)
-        
-        # Generate a conversation ID if it doesn't exist
-        if not conversation_id:
-            conversation_id = f"conv_{uuid.uuid4().hex[:8]}"
-        
-        # Always save the updated conversation
-        try:
-            save_conversation(updated_history, os.path.join(CONVERSATIONS_DIR, f"{conversation_id}.json"))
-        except Exception as e:
-            print(f"Error saving conversation: {str(e)}")
-        
-        return {
-            "response": response,
-            "conversation_id": conversation_id
-        }
-        
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="Invalid JSON in request body")
+        # Clean up the temporary files after processing
+        for path in file_paths:
+            os.remove(path)
+            
+        # Return a helpful message and the new session_id
+        return ChatResponse(
+            answer="Files processed successfully! You can now start chatting.",
+            session_id=session_id
+        )
     except Exception as e:
-        print(f"Error in chat endpoint: {str(e)}")
+        print(f"Upload error: {e}")
+        # Clean up files even if processing fails
+        for path in file_paths:
+            if os.path.exists(path):
+                os.remove(path)
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/health")
-async def health_check():
-    return {"status": "healthy"}
-
-if __name__ == "__main__":
-    uvicorn.run(
-        "main:app",
-        host=HOST,
-        port=PORT,
-        reload=DEBUG
-    )
+@app.post("/chat", response_model=ChatResponse)
+async def chat_with_rag(request: ChatRequest):
+    if not request.session_id:
+        raise HTTPException(status_code=400, detail="session_id is required for chat.")
+    
+    try:
+        memory = get_session_memory(request.session_id)
+        rag_chain = get_conversational_rag_chain(request.session_id, memory)
+        
+        response = await rag_chain.ainvoke({"question": request.query})
+        
+        return ChatResponse(answer=response['answer'], session_id=request.session_id)
+    except Exception as e:
+        print(f"Chat error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
